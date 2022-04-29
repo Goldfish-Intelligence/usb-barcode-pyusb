@@ -1,0 +1,3 @@
+.venv/
+usb_barcode.egg-info/
+usb_barcode/__pycache__/
