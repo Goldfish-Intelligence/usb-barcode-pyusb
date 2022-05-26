@@ -5,6 +5,7 @@ import time
 import usb
 from usb.core import Device
 import multiprocessing as mp
+import pyudev
 
 from usb_barcode.barcode_event import BarcodeEvent, DeviceConnectedEvent, DeviceDisconnectedEvent
 
@@ -116,9 +117,17 @@ def device_loop(eventbus, dev: Device):
     except usb.core.USBError:
         eventbus.put(DeviceDisconnectedEvent(device_id))
 
+def handle_device_connect():
+    pass
 
 def main() -> None:
     eventbus = mp.Queue()
+
+    udev_context = pyudev.Context()
+    usb_monitor = pyudev.Monitor.from_netlink(udev_context)
+    usb_monitor.filter_by('usb')
+    for udev_device in iter(usb_monitor.poll(), None):
+        handle_device_connect(udev_device)
 
     configured = get_configured()
     print(f"Got {len(configured)} configured.")
