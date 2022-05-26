@@ -1,6 +1,14 @@
+import base64
+import json
+from pprint import pprint
 import time
 import usb
 from usb.core import Device
+import multiprocessing as mp
+
+from usb_barcode.barcode_event import BarcodeEvent, DeviceConnectedEvent, DeviceDisconnectedEvent
+
+# see: https://source.android.com/devices/accessories/aoa
 
 # 0x18d1 used by devices in accessory mode but also pixels in unconfigured state
 VENDORS = [0x18d1]
@@ -55,7 +63,8 @@ def try_configure(dev: Device) -> bool:
     # command: transmit property information of this system to phone.
     # this enables Android to decide which app to open for example
     for i, data in enumerate((MANUFACTURE, MODEL, DESCRIPTION, VERSION, URI, SERIAL)):
-        dev.ctrl_transfer(bmRequestType=0x40, bRequest=52, wIndex=i, data_or_wLength=data)
+        dev.ctrl_transfer(bmRequestType=0x40, bRequest=52,
+                          wIndex=i, data_or_wLength=data)
 
     # command: start accessory mode
     dev.ctrl_transfer(bmRequestType=0x40, bRequest=53) == 0
@@ -79,29 +88,57 @@ def try_configure(dev: Device) -> bool:
     return None
 
 
+def device_loop(eventbus, dev: Device):
+    device_id = f"{dev.bus}-{dev.address}"
+
+    eventbus.put(DeviceConnectedEvent(device_id))
+
+    try:
+        configuration = dev.get_active_configuration()
+        interface = configuration[(0, 0)]
+        endpoint_in = usb.util.find_descriptor(
+            interface, custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_IN)
+
+        while True:
+            size_bytes = endpoint_in.read(2, timeout=-1)
+            size = (size_bytes[0] << 8) | size_bytes[1]
+            payload = json.reads(endpoint_in.read(
+                size, timeout=-1).tobytes().decode('utf-8'))
+            raw_data = None
+            if "rawBase64" in payload:
+                raw_data = payload["rawBase64"]
+                raw_data = base64.standard_b64decode(raw_data)
+            raw_string = None
+            if "rawUTF8" in payload:
+                raw_string = payload["rawUTF8"]
+            eventbus.put(BarcodeEvent(
+                device_id, raw_data=raw_data, string_data=raw_string))
+    except usb.core.USBError:
+        eventbus.put(DeviceDisconnectedEvent(device_id))
+
+
 def main() -> None:
+    eventbus = mp.Queue()
+
     configured = get_configured()
     print(f"Got {len(configured)} configured.")
     unconfigured = get_unconfigured()
     if unconfigured:
-        print(f"Got {len(unconfigured)} unconfigured. Trying to start accessory mode ...")
+        print(
+            f"Got {len(unconfigured)} unconfigured. Trying to start accessory mode ...")
         for dev in unconfigured:
             new_dev = try_configure(dev)
             if new_dev:
                 configured.append(new_dev)
 
-    dev = configured[0]
-    print("Using first device")
-    configuration = dev.get_active_configuration()
-    interface = configuration[(0, 0)]
-    endpoint_in = usb.util.find_descriptor(
-            interface, custom_match= lambda e: usb.util.endpoint_direction(e.bEndpointAddress)
-                    == usb.util.ENDPOINT_IN)
+    for dev in configured:
+        p = mp.Process(target=device_loop, args=(eventbus, dev))
+        p.start()
 
     while True:
-        size_bytes = endpoint_in.read(2, timeout=-1)
-        size = (size_bytes[0] << 8) | size_bytes[1]
-        print(endpoint_in.read(size, timeout=-1).tobytes().decode('utf-8'))
+        scan_event = eventbus.get()
+        pprint(scan_event)
+
 
 if __name__ == "__main__":
     main()
